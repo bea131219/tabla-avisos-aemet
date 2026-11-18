@@ -2,22 +2,23 @@ const { chromium } = require('playwright');
 const fs = require('fs');
 
 function getTomorrowStampMadrid() {
-  const madridToday = new Intl.DateTimeFormat('en-CA', {
+  const today = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Europe/Madrid',
     year: 'numeric', month: '2-digit', day: '2-digit'
   }).format(new Date());
-  const [year, month, day] = madridToday.split('-').map(Number);
-  const tomorrow = new Date(Date.UTC(year, month - 1, day + 1));
-  return `${tomorrow.getUTCFullYear()}${String(tomorrow.getUTCMonth()+1).padStart(2,'0')}${String(tomorrow.getUTCDate()).padStart(2,'0')}`;
+  const [y, m, d] = today.split('-').map(Number);
+  const tomorrow = new Date(Date.UTC(y, m - 1, d + 1));
+  return `${tomorrow.getUTCFullYear()}${String(tomorrow.getUTCMonth() + 1).padStart(2, '0')}${String(tomorrow.getUTCDate()).padStart(2, '0')}`;
 }
 
 async function acceptCookies(page) {
-  for (const selector of [
+  const selectors = [
     'button:has-text("Aceptar cookies")',
     'a:has-text("Aceptar cookies")',
     'input[value*="Aceptar cookies"]',
     'text="Aceptar cookies"'
-  ]) {
+  ];
+  for (const selector of selectors) {
     try {
       await page.locator(selector).first().click({ timeout: 2500 });
       return;
@@ -25,54 +26,39 @@ async function acceptCookies(page) {
   }
 }
 
-async function findAvisosMeteorologicosBlock(page) {
-  // La tabla horaria de AEMET no expone necesariamente las horas como texto
-  // (las celdas de colores pueden renderizarse con imagenes/estilos), por lo que
-  // no exigimos encontrar 00..23 en innerText.
-  const tables = page.locator('table');
-  const total = await tables.count();
+async function getAvisosClip(page) {
+  // Buscamos el segundo texto "Avisos meteorológicos", que corresponde
+  // al encabezado de la matriz horaria, no el titulo general de la pagina.
+  const titles = page.getByText('Avisos meteorológicos', { exact: true });
+  const count = await titles.count();
+  if (!count) throw new Error('No se encontro el encabezado Avisos meteorológicos.');
 
-  for (let i = 0; i < total; i++) {
-    const table = tables.nth(i);
-    const text = (await table.innerText().catch(() => '')).replace(/\s+/g, ' ').trim();
-    const rows = await table.locator('tr').count().catch(() => 0);
-    const maxCells = await table.locator('tr').evaluateAll((trs) =>
-      trs.reduce((max, tr) => Math.max(max, tr.querySelectorAll('td,th').length), 0)
-    ).catch(() => 0);
+  let heading = titles.nth(count - 1);
+  await heading.scrollIntoViewIfNeeded();
+  await heading.waitFor({ state: 'visible', timeout: 30000 });
 
-    const hasRegions =
-      text.includes('Andalucía') &&
-      (text.includes('Principado de Asturias') || text.includes('Illes Balears')) &&
-      text.includes('Cantabria');
+  // "Detalle de avisos" marca el limite inferior del bloque que queremos.
+  const detail = page.getByText('Detalle de avisos', { exact: true }).first();
+  await detail.waitFor({ state: 'attached', timeout: 30000 });
 
-    const isDetailTable =
-      text.includes('Fenómenos previstos') ||
-      text.includes('Nivel de aviso') ||
-      text.includes('Probabilidad') ||
-      text.includes('Zona de avisos') ||
-      text.includes('Hora de comienzo') ||
-      text.includes('Hora de finalización') ||
-      text.includes('Comentario');
-
-    // La matriz horaria tiene muchas columnas (24 horas + columnas iniciales)
-    // y varias filas de comunidades. El detalle tiene solo unas pocas columnas.
-    if (hasRegions && !isDetailTable && rows >= 4 && maxCells >= 20) {
-      // Intentamos incluir el titulo "Avisos meteorológicos" y la franja del dia.
-      let candidate = table;
-      for (let level = 0; level < 4; level++) {
-        const parent = candidate.locator('xpath=..');
-        const parentText = (await parent.innerText().catch(() => '')).replace(/\s+/g, ' ');
-        if (parentText.includes('Detalle de avisos')) break;
-        if (parentText.includes('Avisos meteorológicos')) candidate = parent;
-        else break;
-      }
-      return candidate;
-    }
+  const headingBox = await heading.boundingBox();
+  const detailBox = await detail.boundingBox();
+  if (!headingBox || !detailBox) {
+    throw new Error('No se pudieron obtener las dimensiones del bloque de avisos.');
   }
 
-  // Diagnostico util en GitHub Actions si AEMET vuelve a cambiar el HTML.
-  console.error(`Se inspeccionaron ${total} tablas y ninguna coincidio con la matriz horaria.`);
-  throw new Error('No se encontro la tabla horaria de Avisos meteorológicos.');
+  // Capturamos desde ligeramente encima del titulo hasta justo antes del detalle.
+  // El ancho usa el area visible de contenido para incluir toda la escala 00-23.
+  const left = 40;
+  const top = Math.max(0, headingBox.y - 12);
+  const right = Math.min(await page.evaluate(() => document.documentElement.scrollWidth), 1380);
+  const bottom = detailBox.y - 10;
+
+  if (bottom <= top) {
+    throw new Error('La seccion Detalle de avisos aparece antes que la matriz horaria.');
+  }
+
+  return { x: left, y: top, width: right - left, height: bottom - top };
 }
 
 (async () => {
@@ -80,38 +66,38 @@ async function findAvisosMeteorologicosBlock(page) {
   try {
     fs.mkdirSync('docs/archive', { recursive: true });
     browser = await chromium.launch({ headless: true });
-    const page = await browser.newPage({ viewport: { width: 1400, height: 1200 }, deviceScaleFactor: 1 });
-
-    await page.goto('https://www.aemet.es/es/eltiempo/prediccion/avisos?datos=img&f=AT&w=mna', {
-      waitUntil: 'domcontentloaded', timeout: 90000
+    const page = await browser.newPage({
+      viewport: { width: 1400, height: 1200 },
+      deviceScaleFactor: 1
     });
+
+    await page.goto(
+      'https://www.aemet.es/es/eltiempo/prediccion/avisos?datos=img&f=AT&w=mna',
+      { waitUntil: 'domcontentloaded', timeout: 90000 }
+    );
 
     await acceptCookies(page);
     await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
-    await page.waitForTimeout(2500);
+    await page.waitForTimeout(4000);
 
-    const block = await findAvisosMeteorologicosBlock(page);
-    await block.waitFor({ state: 'visible', timeout: 60000 });
-    await block.scrollIntoViewIfNeeded();
-
-    await block.evaluate(async (element) => {
-      const images = Array.from(element.querySelectorAll('img'));
+    // Esperar a las imagenes del documento, ya que la matriz utiliza recursos graficos.
+    await page.evaluate(async () => {
+      const images = Array.from(document.images);
       await Promise.all(images.map(img => img.complete ? Promise.resolve() : new Promise(resolve => {
         img.addEventListener('load', resolve, { once: true });
         img.addEventListener('error', resolve, { once: true });
       })));
     });
 
-    await page.waitForTimeout(750);
-
+    const clip = await getAvisosClip(page);
     const latestFile = 'docs/aemet-tabla-manana.png';
     const archiveFile = `docs/archive/aemet-tabla-manana-${getTomorrowStampMadrid()}.png`;
 
-    await block.screenshot({ path: latestFile, type: 'png' });
+    await page.screenshot({ path: latestFile, type: 'png', clip });
     fs.copyFileSync(latestFile, archiveFile);
 
-    console.log(`Tabla de Avisos meteorológicos guardada: ${latestFile}`);
-    console.log(`Copia historica guardada: ${archiveFile}`);
+    console.log(`Captura creada: ${latestFile}`);
+    console.log(`Historico creado: ${archiveFile}`);
   } catch (error) {
     console.error('Error durante la captura:', error);
     process.exitCode = 1;
