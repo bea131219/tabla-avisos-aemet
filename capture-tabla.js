@@ -26,54 +26,53 @@ async function acceptCookies(page) {
 }
 
 async function findAvisosMeteorologicosBlock(page) {
-  // No usamos "following::table[1]": ese selector puede saltar a "Detalle de avisos".
-  // Localizamos una tabla por sus rasgos exclusivos: comunidades + escala horaria 00..23.
+  // La tabla horaria de AEMET no expone necesariamente las horas como texto
+  // (las celdas de colores pueden renderizarse con imagenes/estilos), por lo que
+  // no exigimos encontrar 00..23 en innerText.
   const tables = page.locator('table');
   const total = await tables.count();
 
   for (let i = 0; i < total; i++) {
     const table = tables.nth(i);
     const text = (await table.innerText().catch(() => '')).replace(/\s+/g, ' ').trim();
+    const rows = await table.locator('tr').count().catch(() => 0);
+    const maxCells = await table.locator('tr').evaluateAll((trs) =>
+      trs.reduce((max, tr) => Math.max(max, tr.querySelectorAll('td,th').length), 0)
+    ).catch(() => 0);
 
     const hasRegions =
       text.includes('Andalucía') &&
-      text.includes('Cantabria') &&
-      (text.includes('Principado de Asturias') || text.includes('País Vasco'));
-
-    const hasHourlyScale =
-      /(^|\s)00(\s|$)/.test(text) &&
-      /(^|\s)01(\s|$)/.test(text) &&
-      /(^|\s)22(\s|$)/.test(text) &&
-      /(^|\s)23(\s|$)/.test(text);
+      (text.includes('Principado de Asturias') || text.includes('Illes Balears')) &&
+      text.includes('Cantabria');
 
     const isDetailTable =
       text.includes('Fenómenos previstos') ||
       text.includes('Nivel de aviso') ||
       text.includes('Probabilidad') ||
+      text.includes('Zona de avisos') ||
       text.includes('Hora de comienzo') ||
-      text.includes('Hora de finalización');
+      text.includes('Hora de finalización') ||
+      text.includes('Comentario');
 
-    if (hasRegions && hasHourlyScale && !isDetailTable) {
-      // Si el titulo esta en un contenedor padre, capturamos el bloque completo
-      // para incluir "Avisos meteorológicos", la tabla y la franja azul del dia.
-      const parentCandidates = [
-        table.locator('xpath=..'),
-        table.locator('xpath=../..'),
-        table.locator('xpath=../../..')
-      ];
-
-      for (const candidate of parentCandidates) {
-        const candidateText = (await candidate.innerText().catch(() => '')).replace(/\s+/g, ' ');
-        if (candidateText.includes('Avisos meteorológicos') && !candidateText.includes('Detalle de avisos')) {
-          return candidate;
-        }
+    // La matriz horaria tiene muchas columnas (24 horas + columnas iniciales)
+    // y varias filas de comunidades. El detalle tiene solo unas pocas columnas.
+    if (hasRegions && !isDetailTable && rows >= 4 && maxCells >= 20) {
+      // Intentamos incluir el titulo "Avisos meteorológicos" y la franja del dia.
+      let candidate = table;
+      for (let level = 0; level < 4; level++) {
+        const parent = candidate.locator('xpath=..');
+        const parentText = (await parent.innerText().catch(() => '')).replace(/\s+/g, ' ');
+        if (parentText.includes('Detalle de avisos')) break;
+        if (parentText.includes('Avisos meteorológicos')) candidate = parent;
+        else break;
       }
-
-      return table;
+      return candidate;
     }
   }
 
-  throw new Error('No se encontro la tabla horaria de Avisos meteorológicos (00-23).');
+  // Diagnostico util en GitHub Actions si AEMET vuelve a cambiar el HTML.
+  console.error(`Se inspeccionaron ${total} tablas y ninguna coincidio con la matriz horaria.`);
+  throw new Error('No se encontro la tabla horaria de Avisos meteorológicos.');
 }
 
 (async () => {
