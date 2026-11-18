@@ -49,7 +49,7 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: Ejecutar captura de la tabla de AEMET
-        run: node capture-tabla.js
+        run: node capture-tabla-corregido.js
 
       - name: Comprobar que se ha generado la imagen
         run: |
