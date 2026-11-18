@@ -35,12 +35,12 @@ jobs:
           echo "Evento que inicio el workflow: ${{ github.event_name }}"
 
       - name: Descargar el repositorio
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Configurar Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: '24'
 
       - name: Instalar Playwright
         run: npm install --no-save playwright
@@ -49,7 +49,7 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: Ejecutar captura de la tabla de AEMET
-        run: node capture-tabla-corregido.js
+        run: node capture-tabla.js
 
       - name: Comprobar que se ha generado la imagen
         run: |
