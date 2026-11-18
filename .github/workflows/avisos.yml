@@ -1,0 +1,73 @@
+name: Captura diaria tabla avisos AEMET
+
+on:
+  # Ejecucion automatica diaria.
+  # 06:00 UTC = 07:00 en invierno / 08:00 en verano en Espana peninsular.
+  schedule:
+    - cron: '0 6 * * *'
+
+  # Permite ejecutar el workflow manualmente desde GitHub.
+  workflow_dispatch:
+
+  # Permite que Power Automate inicie el workflow.
+  repository_dispatch:
+    types:
+      - captura_aemet
+
+# Permite guardar las capturas en el repositorio.
+permissions:
+  contents: write
+
+# Evita que dos ejecuciones modifiquen los archivos simultaneamente.
+concurrency:
+  group: captura-diaria-tabla-aemet
+  cancel-in-progress: false
+
+jobs:
+  captura:
+    name: Capturar tabla de avisos AEMET
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Mostrar origen de la ejecucion
+        run: |
+          echo "Evento que inicio el workflow: ${{ github.event_name }}"
+
+      - name: Descargar el repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Instalar Playwright
+        run: npm install --no-save playwright
+
+      - name: Instalar Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Ejecutar captura de la tabla de AEMET
+        run: node capture-tabla.js
+
+      - name: Comprobar que se ha generado la imagen
+        run: |
+          if [ ! -f "docs/aemet-tabla-manana.png" ]; then
+            echo "ERROR: No se ha generado docs/aemet-tabla-manana.png"
+            exit 1
+          fi
+          echo "Captura generada correctamente:"
+          ls -lh docs/aemet-tabla-manana.png
+
+      - name: Guardar las imagenes en el repositorio
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/
+          if git diff --cached --quiet; then
+            echo "La captura no contiene cambios que guardar."
+          else
+            git commit -m "Actualiza tabla diaria de avisos AEMET"
+            git push
+          fi
