@@ -1,14 +1,23 @@
 const { chromium } = require('playwright');
 const fs = require('fs');
 
+// Devuelve la fecha de manana en Madrid con formato YYYYMMDD.
 function getTomorrowStampMadrid() {
-  const today = new Intl.DateTimeFormat('en-CA', {
+  const madridToday = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Europe/Madrid',
-    year: 'numeric', month: '2-digit', day: '2-digit'
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
   }).format(new Date());
-  const [y, m, d] = today.split('-').map(Number);
-  const tomorrow = new Date(Date.UTC(y, m - 1, d + 1));
-  return `${tomorrow.getUTCFullYear()}${String(tomorrow.getUTCMonth() + 1).padStart(2, '0')}${String(tomorrow.getUTCDate()).padStart(2, '0')}`;
+
+  const [year, month, day] = madridToday.split('-').map(Number);
+  const tomorrowUtc = new Date(Date.UTC(year, month - 1, day + 1));
+
+  return [
+    tomorrowUtc.getUTCFullYear(),
+    String(tomorrowUtc.getUTCMonth() + 1).padStart(2, '0'),
+    String(tomorrowUtc.getUTCDate()).padStart(2, '0')
+  ].join('');
 }
 
 async function acceptCookies(page) {
@@ -18,90 +27,119 @@ async function acceptCookies(page) {
     'input[value*="Aceptar cookies"]',
     'text="Aceptar cookies"'
   ];
+
   for (const selector of selectors) {
     try {
-      await page.locator(selector).first().click({ timeout: 2500 });
+      await page.locator(selector).first().click({ timeout: 3000 });
+      console.log('Aviso de cookies cerrado.');
       return;
-    } catch {}
+    } catch {
+      // Probar el siguiente selector.
+    }
   }
+
+  console.log('No se encontro el aviso de cookies o ya estaba aceptado.');
 }
 
-async function getAvisosClip(page) {
-  // Buscamos el segundo texto "Avisos meteorológicos", que corresponde
-  // al encabezado de la matriz horaria, no el titulo general de la pagina.
-  const titles = page.getByText('Avisos meteorológicos', { exact: true });
-  const count = await titles.count();
-  if (!count) throw new Error('No se encontro el encabezado Avisos meteorológicos.');
+async function findWarningsTable(page) {
+  // La tabla deseada contiene las 24 horas y comunidades autonomas.
+  // Priorizamos una tabla cercana al texto "Avisos meteorologicos".
+  const heading = page.getByText('Avisos meteorológicos', { exact: true }).last();
 
-  let heading = titles.nth(count - 1);
-  await heading.scrollIntoViewIfNeeded();
-  await heading.waitFor({ state: 'visible', timeout: 30000 });
-
-  // "Detalle de avisos" marca el limite inferior del bloque que queremos.
-  const detail = page.getByText('Detalle de avisos', { exact: true }).first();
-  await detail.waitFor({ state: 'attached', timeout: 30000 });
-
-  const headingBox = await heading.boundingBox();
-  const detailBox = await detail.boundingBox();
-  if (!headingBox || !detailBox) {
-    throw new Error('No se pudieron obtener las dimensiones del bloque de avisos.');
+  if (await heading.count()) {
+    const nearHeading = heading.locator('xpath=following::table[1]');
+    if (await nearHeading.count()) {
+      return nearHeading.first();
+    }
   }
 
-  // Capturamos desde ligeramente encima del titulo hasta justo antes del detalle.
-  // El ancho usa el area visible de contenido para incluir toda la escala 00-23.
-  const left = 40;
-  const top = Math.max(0, headingBox.y - 12);
-  const right = Math.min(await page.evaluate(() => document.documentElement.scrollWidth), 1380);
-  const bottom = detailBox.y - 10;
-
-  if (bottom <= top) {
-    throw new Error('La seccion Detalle de avisos aparece antes que la matriz horaria.');
+  // Respaldo por contenido caracteristico de la tabla.
+  const candidates = page.locator('table');
+  for (let i = 0; i < await candidates.count(); i++) {
+    const table = candidates.nth(i);
+    const text = (await table.innerText().catch(() => '')).replace(/\s+/g, ' ');
+    if (
+      text.includes('Andalucía') &&
+      text.includes('Cantabria') &&
+      text.includes('00') &&
+      text.includes('23')
+    ) {
+      return table;
+    }
   }
 
-  return { x: left, y: top, width: right - left, height: bottom - top };
+  throw new Error('No se pudo localizar la tabla de Avisos meteorológicos.');
 }
 
 (async () => {
   let browser;
+
   try {
     fs.mkdirSync('docs/archive', { recursive: true });
+
     browser = await chromium.launch({ headless: true });
+
     const page = await browser.newPage({
       viewport: { width: 1400, height: 1200 },
       deviceScaleFactor: 1
     });
 
+    console.log('Abriendo los avisos meteorologicos de manana...');
+
     await page.goto(
       'https://www.aemet.es/es/eltiempo/prediccion/avisos?datos=img&f=AT&w=mna',
-      { waitUntil: 'domcontentloaded', timeout: 90000 }
+      {
+        waitUntil: 'domcontentloaded',
+        timeout: 90000
+      }
     );
 
     await acceptCookies(page);
-    await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
-    await page.waitForTimeout(4000);
 
-    // Esperar a las imagenes del documento, ya que la matriz utiliza recursos graficos.
-    await page.evaluate(async () => {
-      const images = Array.from(document.images);
-      await Promise.all(images.map(img => img.complete ? Promise.resolve() : new Promise(resolve => {
-        img.addEventListener('load', resolve, { once: true });
-        img.addEventListener('error', resolve, { once: true });
-      })));
+    // Esperar las peticiones y el renderizado dinamico de AEMET.
+    await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
+    await page.waitForTimeout(3000);
+
+    const table = await findWarningsTable(page);
+    await table.waitFor({ state: 'visible', timeout: 60000 });
+    await table.scrollIntoViewIfNeeded();
+
+    // Esperar a que las imagenes/iconos internos terminen de cargar.
+    await table.evaluate(async (element) => {
+      const images = Array.from(element.querySelectorAll('img'));
+      await Promise.all(
+        images.map((img) => {
+          if (img.complete) return Promise.resolve();
+          return new Promise((resolve) => {
+            img.addEventListener('load', resolve, { once: true });
+            img.addEventListener('error', resolve, { once: true });
+          });
+        })
+      );
     });
 
-    const clip = await getAvisosClip(page);
-    const latestFile = 'docs/aemet-tabla-manana.png';
-    const archiveFile = `docs/archive/aemet-tabla-manana-${getTomorrowStampMadrid()}.png`;
+    await page.waitForTimeout(1000);
 
-    await page.screenshot({ path: latestFile, type: 'png', clip });
+    const tomorrowStamp = getTomorrowStampMadrid();
+    const latestFile = 'docs/aemet-tabla-manana.png';
+    const archiveFile = `docs/archive/aemet-tabla-manana-${tomorrowStamp}.png`;
+
+    // Capturar exclusivamente la tabla de avisos horarios.
+    await table.screenshot({
+      path: latestFile,
+      type: 'png'
+    });
+
     fs.copyFileSync(latestFile, archiveFile);
 
-    console.log(`Captura creada: ${latestFile}`);
-    console.log(`Historico creado: ${archiveFile}`);
+    console.log(`Tabla actualizada: ${latestFile}`);
+    console.log(`Tabla archivada: ${archiveFile}`);
   } catch (error) {
-    console.error('Error durante la captura:', error);
+    console.error('Error durante la captura de la tabla:', error);
     process.exitCode = 1;
   } finally {
-    if (browser) await browser.close();
+    if (browser) {
+      await browser.close();
+    }
   }
 })();
