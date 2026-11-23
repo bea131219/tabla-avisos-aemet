@@ -14,28 +14,34 @@ on:
     types:
       - captura_aemet
 
-# Permite guardar las capturas en el repositorio.
 permissions:
   contents: write
 
-# Evita que dos ejecuciones modifiquen los archivos simultaneamente.
+# Evita dos ejecuciones simultaneas de este workflow.
 concurrency:
   group: captura-diaria-tabla-aemet
   cancel-in-progress: false
 
 jobs:
+
   captura:
+
     name: Capturar tabla de avisos AEMET
+
     runs-on: ubuntu-latest
+
     timeout-minutes: 15
 
     steps:
+
       - name: Mostrar origen de la ejecucion
         run: |
           echo "Evento que inicio el workflow: ${{ github.event_name }}"
 
       - name: Descargar el repositorio
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Configurar Node.js
         uses: actions/setup-node@v6
@@ -48,26 +54,47 @@ jobs:
       - name: Instalar Chromium
         run: npx playwright install --with-deps chromium
 
-      - name: Ejecutar captura de la tabla de AEMET
+      - name: Capturar tabla y comprobar avisos AEMET
         run: node capture-tabla.js
 
-      - name: Comprobar que se ha generado la imagen
+      - name: Comprobar archivos generados
         run: |
           if [ ! -f "docs/aemet-tabla-manana.png" ]; then
             echo "ERROR: No se ha generado docs/aemet-tabla-manana.png"
             exit 1
           fi
-          echo "Captura generada correctamente:"
-          ls -lh docs/aemet-tabla-manana.png
 
-      - name: Guardar las imagenes en el repositorio
+          if [ ! -f "docs/estado-avisos.txt" ]; then
+            echo "ERROR: No se ha generado docs/estado-avisos.txt"
+            exit 1
+          fi
+
+          echo "Archivos generados correctamente:"
+          ls -lh docs/aemet-tabla-manana.png
+          ls -lh docs/estado-avisos.txt
+
+          echo "Estado de avisos:"
+          cat docs/estado-avisos.txt
+
+      - name: Guardar tabla y estado de avisos en el repositorio
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
           git add docs/
+
           if git diff --cached --quiet; then
-            echo "La captura no contiene cambios que guardar."
+
+            echo "No hay cambios que guardar."
+
           else
-            git commit -m "Actualiza tabla diaria de avisos AEMET"
-            git push
+
+            git commit -m "Actualiza tabla y estado diario de avisos AEMET"
+
+            echo "Sincronizando con la rama main..."
+            git pull --rebase origin main
+
+            echo "Publicando cambios..."
+            git push origin main
+
           fi
