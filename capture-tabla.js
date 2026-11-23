@@ -13,6 +13,7 @@ function tomorrowStampMadrid() {
 
   const [y, m, d] = today.split('-').map(Number);
   const tomorrow = new Date(Date.UTC(y, m - 1, d + 1));
+
   return `${tomorrow.getUTCFullYear()}${String(tomorrow.getUTCMonth() + 1).padStart(2, '0')}${String(tomorrow.getUTCDate()).padStart(2, '0')}`;
 }
 
@@ -33,33 +34,83 @@ async function acceptCookies(page) {
 async function getAvisosClip(page) {
   const headings = page.getByText('Avisos meteorológicos', { exact: true });
   const count = await headings.count();
-  if (!count) throw new Error('No se encontro el encabezado Avisos meteorológicos.');
+  if (!count) throw new Error('No se encontro el encabezado Avisos meteorologicos.');
 
-  // En AEMET hay un titulo general y otro asociado al bloque de la matriz.
+  // AEMET puede tener mas de un texto "Avisos meteorologicos".
+  // Usamos el ultimo, que corresponde al bloque de la matriz horaria.
   const heading = headings.nth(count - 1);
   await heading.waitFor({ state: 'visible', timeout: 30000 });
   await heading.scrollIntoViewIfNeeded();
 
-  const detail = page.getByText('Detalle de avisos', { exact: true }).first();
-  await detail.waitFor({ state: 'attached', timeout: 30000 });
+  // El detalle debe existir antes de calcular la captura completa.
+  const detailHeading = page.getByText('Detalle de avisos', { exact: true }).first();
+  await detailHeading.waitFor({ state: 'visible', timeout: 30000 });
+
+  // Esperar a que se renderice la tabla de detalle. Los encabezados mostrados
+  // por AEMET permiten localizarla sin depender de una clase CSS concreta.
+  const detailHeader = page.getByText('Fenómenos previstos', { exact: true }).first();
+  await detailHeader.waitFor({ state: 'visible', timeout: 30000 }).catch(() => {});
+  await page.waitForTimeout(1500);
 
   const headingBox = await heading.boundingBox();
-  const detailBox = await detail.boundingBox();
-  if (!headingBox || !detailBox) {
-    throw new Error('No se pudieron obtener dimensiones del bloque Avisos meteorológicos.');
+  const detailHeadingBox = await detailHeading.boundingBox();
+
+  if (!headingBox || !detailHeadingBox) {
+    throw new Error('No se pudieron obtener las dimensiones de los bloques de avisos.');
   }
 
+  // Localizar el contenedor visible que engloba el detalle, incluyendo filas.
+  // Partimos del texto "Detalle de avisos" y buscamos, entre sus elementos
+  // siguientes, el que llegue mas abajo y contenga los encabezados de la tabla.
+  const detailBottom = await detailHeading.evaluate((el) => {
+    const startY = el.getBoundingClientRect().top + window.scrollY;
+    let bestBottom = el.getBoundingClientRect().bottom + window.scrollY;
+
+    const candidates = Array.from(document.querySelectorAll('table, div'));
+    for (const node of candidates) {
+      const text = (node.innerText || '').replace(/\s+/g, ' ').trim();
+      if (!text.includes('Fenómenos previstos') ||
+          !text.includes('Nivel de aviso') ||
+          !text.includes('Zona de avisos')) {
+        continue;
+      }
+
+      const rect = node.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) continue;
+
+      const top = rect.top + window.scrollY;
+      const bottom = rect.bottom + window.scrollY;
+
+      // Solo considerar la tabla situada debajo de "Detalle de avisos".
+      if (bottom >= startY && top < startY + 500) {
+        bestBottom = Math.max(bestBottom, bottom);
+      }
+    }
+
+    return bestBottom;
+  });
+
   const scrollWidth = await page.evaluate(() => document.documentElement.scrollWidth);
+  const scrollHeight = await page.evaluate(() => document.documentElement.scrollHeight);
+
   const left = 35;
   const top = Math.max(0, headingBox.y - 12);
   const right = Math.min(scrollWidth - 10, 1390);
-  const bottom = detailBox.y - 10;
+
+  // CAMBIO PRINCIPAL: ya no terminamos antes de "Detalle de avisos".
+  // La captura llega hasta el final de la tabla y deja un pequeno margen.
+  const bottom = Math.min(scrollHeight - 5, Math.ceil(detailBottom + 15));
 
   if (bottom <= top || right <= left) {
     throw new Error(`Clip invalido: left=${left}, top=${top}, right=${right}, bottom=${bottom}`);
   }
 
-  return { x: left, y: top, width: right - left, height: bottom - top };
+  return {
+    x: left,
+    y: top,
+    width: right - left,
+    height: bottom - top
+  };
 }
 
 function detectAlertState(text) {
@@ -84,12 +135,14 @@ function detectAlertState(text) {
     fs.mkdirSync('docs/archive', { recursive: true });
 
     browser = await chromium.launch({ headless: true });
+
     const page = await browser.newPage({
       viewport: { width: 1400, height: 1200 },
       deviceScaleFactor: 1
     });
 
     console.log(`Abriendo AEMET: ${AEMET_URL}`);
+
     await page.goto(AEMET_URL, {
       waitUntil: 'domcontentloaded',
       timeout: 90000
@@ -99,7 +152,7 @@ function detectAlertState(text) {
     await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
     await page.waitForTimeout(4000);
 
-    // Esperar recursos graficos antes de capturar la matriz horaria.
+    // Esperar a que terminen de cargar imagenes e iconos antes de capturar.
     await page.evaluate(async () => {
       const images = Array.from(document.images);
       await Promise.all(images.map((img) => {
@@ -113,7 +166,9 @@ function detectAlertState(text) {
 
     const stamp = tomorrowStampMadrid();
 
-    // 1) Captura de la tabla/matriz de Avisos meteorologicos.
+    // 1) Captura conjunta:
+    //    - Avisos meteorologicos (matriz horaria)
+    //    - Detalle de avisos (tabla completa)
     const clip = await getAvisosClip(page);
     const latestPng = 'docs/aemet-tabla-manana.png';
     const archivePng = `docs/archive/aemet-tabla-manana-${stamp}.png`;
@@ -123,11 +178,13 @@ function detectAlertState(text) {
       type: 'png',
       clip
     });
+
     fs.copyFileSync(latestPng, archivePng);
 
     // 2) Estado de los avisos para Power Automate.
     const bodyText = await page.locator('body').innerText();
     const state = detectAlertState(bodyText);
+
     const latestTxt = 'docs/estado-avisos.txt';
     const archiveTxt = `docs/archive/estado-avisos-${stamp}.txt`;
 
