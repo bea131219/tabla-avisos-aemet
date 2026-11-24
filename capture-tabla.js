@@ -8,141 +8,112 @@ function fechaManana() {
     timeZone: 'Europe/Madrid', year: 'numeric', month: '2-digit', day: '2-digit'
   }).format(new Date()).split('-').map(Number);
   const d = new Date(Date.UTC(p[0], p[1] - 1, p[2] + 1));
-  return `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, '0')}${String(d.getUTCDate()).padStart(2, '0')}`;
+  return `${d.getUTCFullYear()}${String(d.getUTCMonth()+1).padStart(2,'0')}${String(d.getUTCDate()).padStart(2,'0')}`;
 }
 
 async function aceptarCookies(page) {
-  for (const selector of [
-    'button:has-text("Aceptar cookies")',
-    'a:has-text("Aceptar cookies")',
-    'text="Aceptar cookies"'
-  ]) {
-    try {
-      await page.locator(selector).first().click({ timeout: 2000 });
-      return;
-    } catch {}
+  for (const s of ['button:has-text("Aceptar cookies")','a:has-text("Aceptar cookies")','text="Aceptar cookies"']) {
+    try { await page.locator(s).first().click({ timeout: 2000 }); return; } catch {}
   }
 }
 
 function estadoAvisos(texto) {
-  const cabeceras = texto.includes('Fenómenos previstos') &&
-    texto.includes('Nivel de aviso') &&
-    texto.includes('Zona de avisos');
+  const cabeceras = texto.includes('Fenómenos previstos') && texto.includes('Nivel de aviso') && texto.includes('Zona de avisos');
   const nivel = /Peligro\s+(bajo|importante|extraordinario)/i.test(texto);
   return cabeceras && nivel ? 'CON_AVISOS' : 'SIN_AVISOS';
 }
 
 (async () => {
   let browser;
-
   try {
     fs.mkdirSync('docs/archive', { recursive: true });
-
     browser = await chromium.launch({ headless: true });
-    const page = await browser.newPage({
-      viewport: { width: 1600, height: 1200 },
-      deviceScaleFactor: 1
-    });
+    const page = await browser.newPage({ viewport: { width: 1600, height: 1200 }, deviceScaleFactor: 1 });
 
-    await page.goto(URL, {
-      waitUntil: 'domcontentloaded',
-      timeout: 90000
-    });
-
+    await page.goto(URL, { waitUntil: 'domcontentloaded', timeout: 90000 });
     await aceptarCookies(page);
     await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
 
+    const tituloResumen = page.getByText('Avisos meteorológicos', { exact: true }).last();
     const tituloDetalle = page.getByText('Detalle de avisos', { exact: true }).last();
+    await tituloResumen.waitFor({ state: 'visible', timeout: 30000 });
     await tituloDetalle.waitFor({ state: 'visible', timeout: 30000 });
-    await tituloDetalle.scrollIntoViewIfNeeded();
-    await page.waitForTimeout(1500);
 
-    // Localizar SOLO la tabla real de Detalle de avisos.
-    const tablaDetalle = page.locator('table').filter({
-      hasText: 'Fenómenos previstos'
-    }).filter({
-      hasText: 'Nivel de aviso'
-    }).filter({
-      hasText: 'Zona de avisos'
-    }).filter({
-      hasText: 'Comentario'
-    }).last();
+    const tablaResumen = page.locator('table').filter({ hasText: '00' }).filter({ hasText: '23' }).filter({ hasText: /lunes|martes|miércoles|jueves|viernes|sábado|domingo/i }).last();
+    const tablaDetalle = page.locator('table').filter({ hasText: 'Fenómenos previstos' }).filter({ hasText: 'Nivel de aviso' }).filter({ hasText: 'Zona de avisos' }).filter({ hasText: 'Comentario' }).last();
 
+    await tablaResumen.waitFor({ state: 'visible', timeout: 30000 });
     await tablaDetalle.waitFor({ state: 'visible', timeout: 30000 });
 
-    // Esperar a que AEMET haya incorporado todas las filas. Se considera estable
-    // cuando el numero de filas y la altura dejan de cambiar en varias comprobaciones.
-    let anteriorFilas = -1;
-    let anteriorAlto = -1;
-    let estable = 0;
-
-    for (let intento = 0; intento < 15 && estable < 3; intento++) {
+    // Forzar renderizado completo de la tabla de detalle y esperar estabilidad.
+    let f0 = -1, h0 = -1, estable = 0;
+    for (let i = 0; i < 15 && estable < 3; i++) {
       const filas = tablaDetalle.locator('tr');
-      const total = await filas.count();
-
-      if (total > 0) {
-        await filas.nth(total - 1).scrollIntoViewIfNeeded();
-      }
-
+      const n = await filas.count();
+      if (n) await filas.nth(n - 1).scrollIntoViewIfNeeded();
       await page.waitForTimeout(700);
-
-      const box = await tablaDetalle.boundingBox();
-      const alto = box ? Math.round(box.height) : -1;
-
-      if (total === anteriorFilas && alto === anteriorAlto) {
-        estable++;
-      } else {
-        estable = 0;
-      }
-
-      anteriorFilas = total;
-      anteriorAlto = alto;
+      const b = await tablaDetalle.boundingBox();
+      const h = b ? Math.round(b.height) : -1;
+      if (n === f0 && h === h0) estable++; else estable = 0;
+      f0 = n; h0 = h;
     }
 
-    // Esperar los iconos de fenomenos contenidos en la tabla.
-    await tablaDetalle.evaluate(async (tabla) => {
-      const imagenes = Array.from(tabla.querySelectorAll('img'));
-      await Promise.all(imagenes.map(img => img.complete ? Promise.resolve() : new Promise(resolve => {
+    // Esperar iconos de ambos bloques.
+    await page.evaluate(async () => {
+      await Promise.all(Array.from(document.images).map(img => img.complete ? Promise.resolve() : new Promise(resolve => {
         img.addEventListener('load', resolve, { once: true });
         img.addEventListener('error', resolve, { once: true });
       })));
     });
 
-    const filasFinales = await tablaDetalle.locator('tr').count();
-    const boxFinal = await tablaDetalle.boundingBox();
-
-    if (!boxFinal || boxFinal.width <= 0 || boxFinal.height <= 0) {
-      throw new Error('No se pudieron obtener las dimensiones finales de la tabla Detalle de avisos.');
-    }
-
-    console.log(`Filas finales detectadas: ${filasFinales}`);
-    console.log(`Tamano final tabla: ${Math.round(boxFinal.width)} x ${Math.round(boxFinal.height)} px`);
-
-    const fecha = fechaManana();
-    const png = 'docs/aemet-tabla-manana.png';
-    const historicoPng = `docs/archive/aemet-tabla-manana-${fecha}.png`;
-
-    // CLAVE: screenshot del elemento TABLE completo, no screenshot de un clip de pagina.
-    // Playwright captura todo el elemento aunque su altura sea muy superior al viewport.
-    await tablaDetalle.screenshot({
-      path: png,
-      type: 'png',
-      animations: 'disabled'
+    // Captura 1: resumen "Avisos meteorológicos", incluido su título.
+    const resumenClip = await page.evaluate(() => {
+      const norm = s => (s || '').replace(/\s+/g, ' ').trim();
+      const els = Array.from(document.querySelectorAll('body *'));
+      const titulo = els.find(el => {
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0 && norm(el.textContent) === 'Avisos meteorológicos';
+      });
+      const tablas = Array.from(document.querySelectorAll('table')).filter(t => {
+        const tx = norm(t.innerText); const r = t.getBoundingClientRect();
+        return r.width > 0 && r.height > 0 && /\b00\b/.test(tx) && /\b23\b/.test(tx) && /(lunes|martes|miércoles|jueves|viernes|sábado|domingo)/i.test(tx);
+      });
+      if (!titulo || !tablas.length) throw new Error('No se encontro el resumen Avisos meteorologicos.');
+      const tabla = tablas[tablas.length - 1];
+      const a = titulo.getBoundingClientRect(), b = tabla.getBoundingClientRect();
+      const x = Math.max(0, Math.floor(Math.min(a.left,b.left) + window.scrollX - 8));
+      const y = Math.max(0, Math.floor(a.top + window.scrollY - 8));
+      const right = Math.ceil(Math.max(a.right,b.right) + window.scrollX + 8);
+      const bottom = Math.ceil(b.bottom + window.scrollY + 8);
+      return { x, y, width: right-x, height: bottom-y };
     });
 
-    fs.copyFileSync(png, historicoPng);
+    const fecha = fechaManana();
+    const resumen = 'docs/aemet-avisos-resumen-manana.png';
+    const detalle = 'docs/aemet-tabla-manana.png';
 
-    const textoPagina = await page.locator('body').innerText();
-    const estado = estadoAvisos(textoPagina);
+    await page.screenshot({ path: resumen, type: 'png', clip: resumenClip, animations: 'disabled' });
+
+    // Captura 2: tabla de detalle COMPLETA. Screenshot directo del elemento evita cortes por altura.
+    const filasFinales = await tablaDetalle.locator('tr').count();
+    const boxDetalle = await tablaDetalle.boundingBox();
+    if (!boxDetalle) throw new Error('No se obtuvieron dimensiones de Detalle de avisos.');
+    await tablaDetalle.screenshot({ path: detalle, type: 'png', animations: 'disabled' });
+
+    fs.copyFileSync(resumen, `docs/archive/aemet-avisos-resumen-manana-${fecha}.png`);
+    fs.copyFileSync(detalle, `docs/archive/aemet-tabla-manana-${fecha}.png`);
+
+    const estado = estadoAvisos(await page.locator('body').innerText());
     fs.writeFileSync('docs/estado-avisos.txt', `${estado}\n`, 'utf8');
     fs.writeFileSync(`docs/archive/estado-avisos-${fecha}.txt`, `${estado}\n`, 'utf8');
 
-    console.log(`Captura completa generada: ${png}`);
-    console.log(`Historico: ${historicoPng}`);
+    console.log(`Resumen generado: ${resumen}`);
+    console.log(`Detalle generado: ${detalle}`);
+    console.log(`Filas detalle detectadas: ${filasFinales}`);
+    console.log(`Altura detalle: ${Math.round(boxDetalle.height)} px`);
     console.log(`Estado: ${estado}`);
-
-  } catch (error) {
-    console.error('Error en capture-tabla.js:', error);
+  } catch (e) {
+    console.error('Error en capture-tabla.js:', e);
     process.exitCode = 1;
   } finally {
     if (browser) await browser.close();
