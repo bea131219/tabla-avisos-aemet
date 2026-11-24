@@ -18,7 +18,8 @@ async function aceptarCookies(page) {
 }
 
 function estadoAvisos(texto) {
-  const cabeceras = texto.includes('Fenómenos previstos') && texto.includes('Nivel de aviso') && texto.includes('Zona de avisos');
+  const cabeceras = texto.includes('Fenómenos previstos') &&
+    texto.includes('Nivel de aviso') && texto.includes('Zona de avisos');
   const nivel = /Peligro\s+(bajo|importante|extraordinario)/i.test(texto);
   return cabeceras && nivel ? 'CON_AVISOS' : 'SIN_AVISOS';
 }
@@ -28,7 +29,9 @@ function estadoAvisos(texto) {
   try {
     fs.mkdirSync('docs/archive', { recursive: true });
     browser = await chromium.launch({ headless: true });
-    const page = await browser.newPage({ viewport: { width: 1400, height: 1200 }, deviceScaleFactor: 1 });
+    const page = await browser.newPage({
+      viewport: { width: 1400, height: 1200 }, deviceScaleFactor: 1
+    });
 
     await page.goto(URL, { waitUntil: 'domcontentloaded', timeout: 90000 });
     await aceptarCookies(page);
@@ -38,78 +41,93 @@ function estadoAvisos(texto) {
     const tituloDetalle = page.getByText('Detalle de avisos', { exact: true }).last();
     await tituloAvisos.waitFor({ state: 'visible', timeout: 30000 });
     await tituloDetalle.waitFor({ state: 'visible', timeout: 30000 });
+    await tituloDetalle.scrollIntoViewIfNeeded();
+    await page.waitForTimeout(1500);
 
-    // Recorremos toda la pagina para forzar la carga/renderizado de TODAS las filas.
+    const tabla = page.locator('table').filter({
+      hasText: 'Fenómenos previstos'
+    }).filter({
+      hasText: 'Nivel de aviso'
+    }).filter({
+      hasText: 'Comentario'
+    }).last();
+
+    await tabla.waitFor({ state: 'visible', timeout: 30000 });
+
+    // Forzar la carga de toda la tabla desplazandonos hasta su ultima fila.
+    const filas = tabla.locator('tr');
+    const numeroFilas = await filas.count();
+    if (numeroFilas > 0) {
+      await filas.nth(numeroFilas - 1).scrollIntoViewIfNeeded();
+      await page.waitForTimeout(2000);
+    }
+
     await page.evaluate(async () => {
-      const paso = 700;
-      for (let y = 0; y < document.documentElement.scrollHeight; y += paso) {
-        window.scrollTo(0, y);
-        await new Promise(r => setTimeout(r, 250));
-      }
-      window.scrollTo(0, document.documentElement.scrollHeight);
-      await new Promise(r => setTimeout(r, 1200));
+      await Promise.all(Array.from(document.images).map(img =>
+        img.complete ? Promise.resolve() : new Promise(resolve => {
+          img.addEventListener('load', resolve, { once: true });
+          img.addEventListener('error', resolve, { once: true });
+        })
+      ));
     });
 
-    await page.getByText('Fenómenos previstos', { exact: true }).last().waitFor({ state: 'visible', timeout: 30000 });
-
-    // Esperar imagenes/iconos.
-    await page.evaluate(async () => {
-      await Promise.all(Array.from(document.images).map(img => img.complete ? Promise.resolve() : new Promise(resolve => {
-        img.addEventListener('load', resolve, { once: true });
-        img.addEventListener('error', resolve, { once: true });
-      })));
-      window.scrollTo(0, 0);
-    });
-    await page.waitForTimeout(500);
-
+    // Capturamos el bloque completo: Avisos meteorologicos + Detalle de avisos completo.
+    // No se incluye el bloque superior de Avisos meteorologicos.
     const limites = await page.evaluate(() => {
-      const limpio = v => (v || '').replace(/\s+/g, ' ').trim();
-      const visibles = Array.from(document.querySelectorAll('body *')).filter(el => {
+      const norm = s => (s || '').replace(/\s+/g, ' ').trim();
+      const todos = Array.from(document.querySelectorAll('body *'));
+      const tituloAvisosDOM = todos.find(el => {
         const r = el.getBoundingClientRect();
-        return r.width > 0 && r.height > 0;
+        return r.width > 0 && r.height > 0 && norm(el.textContent) === 'Avisos meteorológicos';
       });
-      const inicio = visibles.find(el => limpio(el.textContent) === 'Avisos meteorológicos');
-      const detalle = visibles.find(el => limpio(el.textContent) === 'Detalle de avisos');
-      if (!inicio || !detalle) throw new Error('No se localizaron Avisos meteorológicos / Detalle de avisos.');
+      const titulo = todos.find(el => {
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0 && norm(el.textContent) === 'Detalle de avisos';
+      });
+      if (!tituloAvisosDOM || !titulo) throw new Error('No se encontraron los bloques Avisos meteorológicos / Detalle de avisos');
 
-      const yInicio = inicio.getBoundingClientRect().top + window.scrollY;
-      const yDetalle = detalle.getBoundingClientRect().top + window.scrollY;
-
-      // Identificar la tabla de Detalle y usar el fondo REAL de todas sus filas.
-      const candidatas = Array.from(document.querySelectorAll('table')).filter(t => {
-        const txt = limpio(t.innerText);
+      const yInicio = tituloAvisosDOM.getBoundingClientRect().top + window.scrollY;
+      const yTitulo = titulo.getBoundingClientRect().top + window.scrollY;
+      const tablas = Array.from(document.querySelectorAll('table')).filter(t => {
+        const txt = norm(t.innerText);
         const r = t.getBoundingClientRect();
-        const top = r.top + window.scrollY;
-        return r.width > 0 && r.height > 0 && top >= yDetalle - 30 &&
-          txt.includes('Fenómenos previstos') && txt.includes('Nivel de aviso') &&
-          txt.includes('Zona de avisos') && txt.includes('Comentario');
+        return r.width > 0 && r.height > 0 &&
+          r.top + window.scrollY >= yTitulo - 20 &&
+          txt.includes('Fenómenos previstos') &&
+          txt.includes('Nivel de aviso') &&
+          txt.includes('Zona de avisos') &&
+          txt.includes('Comentario');
       });
+      if (!tablas.length) throw new Error('No se encontro la tabla Detalle de avisos');
 
-      if (!candidatas.length) throw new Error('No se encontro la tabla completa de Detalle de avisos.');
+      const t = tablas.sort((a,b) => b.getBoundingClientRect().height - a.getBoundingClientRect().height)[0];
+      const rt = t.getBoundingClientRect();
+      const rr = Array.from(t.querySelectorAll('tr')).map(tr => tr.getBoundingClientRect());
+      const bottom = Math.max(rt.bottom + window.scrollY, ...rr.map(r => r.bottom + window.scrollY));
+      const left = Math.min(tituloAvisosDOM.getBoundingClientRect().left, titulo.getBoundingClientRect().left, rt.left) + window.scrollX;
+      const right = Math.max(tituloAvisosDOM.getBoundingClientRect().right, titulo.getBoundingClientRect().right, rt.right) + window.scrollX;
 
-      // Elegimos la candidata que llega mas abajo, evitando quedarnos con un contenedor parcial.
-      const tabla = candidatas.sort((a,b) => b.getBoundingClientRect().height - a.getBoundingClientRect().height)[0];
-      const filas = Array.from(tabla.querySelectorAll('tr'));
-      let fin = tabla.getBoundingClientRect().bottom + window.scrollY;
-      if (filas.length) {
-        fin = Math.max(fin, ...filas.map(f => f.getBoundingClientRect().bottom + window.scrollY));
-      }
-
-      const docW = Math.max(document.body.scrollWidth, document.documentElement.scrollWidth);
-      const docH = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
-      return { yInicio, fin, docW, docH, filas: filas.length };
+      return {
+        x: Math.max(0, Math.floor(left - 8)),
+        y: Math.max(0, Math.floor(yInicio - 8)),
+        right: Math.ceil(right + 8),
+        bottom: Math.ceil(bottom + 15),
+        filas: rr.length,
+        docW: Math.max(document.body.scrollWidth, document.documentElement.scrollWidth),
+        docH: Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)
+      };
     });
 
-    const x = 35;
-    const y = Math.max(0, Math.floor(limites.yInicio - 12));
-    const derecha = Math.min(limites.docW - 10, 1390);
-    // No recortar el fondo al viewport: clip usa coordenadas del documento completo.
-    const abajo = Math.min(limites.docH, Math.ceil(limites.fin + 30));
-    const clip = { x, y, width: derecha - x, height: abajo - y };
+    const clip = {
+      x: limites.x,
+      y: limites.y,
+      width: Math.min(limites.right, limites.docW) - limites.x,
+      height: Math.min(limites.bottom, limites.docH) - limites.y
+    };
+    if (clip.width <= 0 || clip.height <= 0) throw new Error(`Clip invalido: ${JSON.stringify(clip)}`);
 
-    if (clip.width <= 0 || clip.height <= 0) throw new Error(`Recorte invalido: ${JSON.stringify(clip)}`);
-    console.log(`Filas de Detalle detectadas: ${limites.filas}`);
-    console.log('Recorte completo:', clip);
+    console.log(`Filas detectadas en Detalle de avisos: ${limites.filas}`);
+    console.log('Clip Avisos meteorologicos + Detalle completo:', clip);
 
     const fecha = fechaManana();
     const png = 'docs/aemet-tabla-manana.png';
