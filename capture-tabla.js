@@ -126,30 +126,76 @@ function estadoAvisos(texto) {
     const historicoResumen = `docs/archive/aemet-avisos-resumen-manana-${fecha}.png`;
     const historicoPng = `docs/archive/aemet-tabla-manana-${fecha}.png`;
 
-    // RESUMEN: en AEMET este bloque no siempre es una tabla HTML. Por eso NO buscamos <table>.
-    // Capturamos directamente toda la franja comprendida entre los dos titulos visibles.
+    // RESUMEN: capturar exactamente el bloque visible de "Avisos meteorológicos".
+    // El limite inferior es el comienzo de "Detalle de avisos" y el limite horizontal
+    // se calcula con los elementos visibles que hay dentro de esa franja.
     const resumenClip = await page.evaluate(() => {
       const norm = v => (v || '').replace(/\s+/g, ' ').trim();
-      const visibles = Array.from(document.querySelectorAll('body *')).filter(el => {
+      const elementos = Array.from(document.querySelectorAll('body *')).filter(el => {
         const r = el.getBoundingClientRect();
-        return r.width > 0 && r.height > 0;
+        const st = getComputedStyle(el);
+        return r.width > 0 && r.height > 0 && st.visibility !== 'hidden' && st.display !== 'none';
       });
-      const a = visibles.find(el => norm(el.textContent) === 'Avisos meteorológicos');
-      const d = visibles.find(el => norm(el.textContent) === 'Detalle de avisos');
-      if (!a || !d) throw new Error('No se encontraron los titulos para delimitar el resumen.');
+
+      const titulosResumen = elementos.filter(el => norm(el.textContent) === 'Avisos meteorológicos');
+      const titulosDetalle = elementos.filter(el => norm(el.textContent) === 'Detalle de avisos');
+      if (!titulosResumen.length || !titulosDetalle.length) {
+        throw new Error('No se encontraron los titulos Avisos meteorológicos / Detalle de avisos.');
+      }
+
+      // Elegimos la pareja en orden vertical: el Detalle debe estar debajo del Resumen.
+      let a = null, d = null;
+      for (const candidatoA of titulosResumen) {
+        const ra = candidatoA.getBoundingClientRect();
+        const ya = ra.top + window.scrollY;
+        const candidatosD = titulosDetalle
+          .map(el => ({ el, y: el.getBoundingClientRect().top + window.scrollY }))
+          .filter(x => x.y > ya)
+          .sort((x, y) => x.y - y.y);
+        if (candidatosD.length) {
+          a = candidatoA;
+          d = candidatosD[0].el;
+          break;
+        }
+      }
+      if (!a || !d) throw new Error('No se pudo delimitar el bloque Avisos meteorológicos.');
+
       const ra = a.getBoundingClientRect();
       const rd = d.getBoundingClientRect();
-      const x = Math.max(0, Math.floor(ra.left + window.scrollX - 8));
-      const y = Math.max(0, Math.floor(ra.top + window.scrollY - 8));
+      const top = ra.top + window.scrollY;
+      const bottom = rd.top + window.scrollY - 12;
+
+      // Considerar solamente elementos contenidos en la franja del resumen.
+      const dentro = elementos.filter(el => {
+        const r = el.getBoundingClientRect();
+        const t = r.top + window.scrollY;
+        const b = r.bottom + window.scrollY;
+        return b >= top && t < bottom;
+      });
+
+      const left = Math.min(...dentro.map(el => el.getBoundingClientRect().left + window.scrollX));
+      const right = Math.max(...dentro.map(el => el.getBoundingClientRect().right + window.scrollX));
+
+      // Evitar que elementos globales (body/main) ensanchen el recorte: usamos como
+      // referencia el contenido del titulo y limitamos a un ancho maximo razonable.
+      const x = Math.max(0, Math.floor(Math.min(ra.left + window.scrollX, left) - 8));
       const docW = Math.max(document.documentElement.scrollWidth, document.body.scrollWidth);
-      const right = Math.min(docW - 5, 1395);
-      const bottom = Math.floor(rd.top + window.scrollY - 8);
-      return { x, y, width: right - x, height: bottom - y };
+      const maxRight = Math.min(docW - 5, x + 1500);
+      const rFinal = Math.min(Math.ceil(right + 8), maxRight);
+      const y = Math.max(0, Math.floor(top - 8));
+      const bFinal = Math.ceil(bottom);
+
+      return { x, y, width: rFinal - x, height: bFinal - y };
     });
 
     if (resumenClip.width <= 0 || resumenClip.height <= 0) {
       throw new Error(`Recorte del resumen invalido: ${JSON.stringify(resumenClip)}`);
     }
+
+    // Muy importante: volver al inicio del resumen antes de capturar. Sin esto,
+    // Playwright puede conservar el scroll usado para llegar a la ultima fila del detalle.
+    await tituloResumen.scrollIntoViewIfNeeded();
+    await page.waitForTimeout(500);
     await page.screenshot({ path: pngResumen, type: 'png', clip: resumenClip, animations: 'disabled' });
 
     // DETALLE: mantenemos exactamente el metodo que ya funciona: captura del elemento TABLE completo.
