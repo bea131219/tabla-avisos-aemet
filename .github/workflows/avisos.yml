@@ -5,10 +5,8 @@ on:
   # 06:00 UTC = 07:00 en invierno / 08:00 en verano en Espana peninsular.
   schedule:
     - cron: '0 6 * * *'
-
   # Permite ejecutar el workflow manualmente desde GitHub.
   workflow_dispatch:
-
   # Permite que Power Automate inicie el workflow.
   repository_dispatch:
     types:
@@ -23,17 +21,12 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-
   captura:
-
     name: Capturar tabla de avisos AEMET
-
     runs-on: ubuntu-latest
-
     timeout-minutes: 15
 
     steps:
-
       - name: Mostrar origen de la ejecucion
         run: |
           echo "Evento que inicio el workflow: ${{ github.event_name }}"
@@ -54,47 +47,42 @@ jobs:
       - name: Instalar Chromium
         run: npx playwright install --with-deps chromium
 
-      - name: Capturar tabla y comprobar avisos AEMET
+      - name: Capturar resumen, tabla y comprobar avisos AEMET
         run: node capture-tabla.js
 
       - name: Comprobar archivos generados
         run: |
+          if [ ! -f "docs/aemet-avisos-resumen-manana.png" ]; then
+            echo "ERROR: No se ha generado docs/aemet-avisos-resumen-manana.png"
+            exit 1
+          fi
           if [ ! -f "docs/aemet-tabla-manana.png" ]; then
             echo "ERROR: No se ha generado docs/aemet-tabla-manana.png"
             exit 1
           fi
-
           if [ ! -f "docs/estado-avisos.txt" ]; then
             echo "ERROR: No se ha generado docs/estado-avisos.txt"
             exit 1
           fi
 
           echo "Archivos generados correctamente:"
+          ls -lh docs/aemet-avisos-resumen-manana.png
           ls -lh docs/aemet-tabla-manana.png
           ls -lh docs/estado-avisos.txt
-
           echo "Estado de avisos:"
           cat docs/estado-avisos.txt
 
-      - name: Guardar tabla y estado de avisos en el repositorio
+      - name: Guardar resumen, tabla y estado de avisos en el repositorio
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
           git add docs/
-
           if git diff --cached --quiet; then
-
             echo "No hay cambios que guardar."
-
           else
-
-            git commit -m "Actualiza tabla y estado diario de avisos AEMET"
-
+            git commit -m "Actualiza resumen, tabla y estado diario de avisos AEMET"
             echo "Sincronizando con la rama main..."
             git pull --rebase origin main
-
             echo "Publicando cambios..."
             git push origin main
-
           fi
