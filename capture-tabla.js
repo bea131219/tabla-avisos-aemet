@@ -1,4 +1,4 @@
-onst { chromium } = require('playwright');
+const { chromium } = require('playwright');
 const fs = require('fs');
 
 const URL = 'https://www.aemet.es/es/eltiempo/prediccion/avisos?datos=img&f=AT&w=mna';
