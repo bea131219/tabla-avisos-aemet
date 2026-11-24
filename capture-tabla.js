@@ -39,10 +39,20 @@ function estadoAvisos(texto) {
     await tituloResumen.waitFor({ state: 'visible', timeout: 30000 });
     await tituloDetalle.waitFor({ state: 'visible', timeout: 30000 });
 
-    const tablaResumen = page.locator('table').filter({ hasText: '00' }).filter({ hasText: '23' }).filter({ hasText: /lunes|martes|miércoles|jueves|viernes|sábado|domingo/i }).last();
+    // La tabla resumen NO se localiza por el texto 00/23 ni por el nombre del dia.
+    // En AEMET esos textos pueden no estar disponibles como innerText en Chromium.
+    // En su lugar, buscamos la primera tabla visible situada entre los titulos
+    // "Avisos meteorológicos" y "Detalle de avisos".
+    const tablaResumen = page.locator('table').filter({
+      has: page.locator('tr')
+    }).filter({
+      hasNotText: 'Fenómenos previstos'
+    }).filter({
+      hasNotText: 'Nivel de aviso'
+    });
+
     const tablaDetalle = page.locator('table').filter({ hasText: 'Fenómenos previstos' }).filter({ hasText: 'Nivel de aviso' }).filter({ hasText: 'Zona de avisos' }).filter({ hasText: 'Comentario' }).last();
 
-    await tablaResumen.waitFor({ state: 'visible', timeout: 30000 });
     await tablaDetalle.waitFor({ state: 'visible', timeout: 30000 });
 
     // Forzar renderizado completo de la tabla de detalle y esperar estabilidad.
@@ -66,26 +76,50 @@ function estadoAvisos(texto) {
       })));
     });
 
-    // Captura 1: resumen "Avisos meteorológicos", incluido su título.
+    // Captura 1: resumen "Avisos meteorológicos", incluido su titulo.
+    // Determinamos el bloque por POSICION en la pagina, no por los textos horarios.
     const resumenClip = await page.evaluate(() => {
       const norm = s => (s || '').replace(/\s+/g, ' ').trim();
-      const els = Array.from(document.querySelectorAll('body *'));
-      const titulo = els.find(el => {
+      const visibles = Array.from(document.querySelectorAll('body *')).filter(el => {
         const r = el.getBoundingClientRect();
-        return r.width > 0 && r.height > 0 && norm(el.textContent) === 'Avisos meteorológicos';
+        return r.width > 0 && r.height > 0;
       });
+
+      const tituloResumen = visibles.find(el => norm(el.textContent) === 'Avisos meteorológicos');
+      const tituloDetalle = visibles.find(el => norm(el.textContent) === 'Detalle de avisos');
+      if (!tituloResumen || !tituloDetalle) {
+        throw new Error('No se localizaron los titulos Avisos meteorológicos / Detalle de avisos.');
+      }
+
+      const rInicio = tituloResumen.getBoundingClientRect();
+      const rDetalle = tituloDetalle.getBoundingClientRect();
+      const yInicio = rInicio.top + window.scrollY;
+      const yDetalle = rDetalle.top + window.scrollY;
+
       const tablas = Array.from(document.querySelectorAll('table')).filter(t => {
-        const tx = norm(t.innerText); const r = t.getBoundingClientRect();
-        return r.width > 0 && r.height > 0 && /\b00\b/.test(tx) && /\b23\b/.test(tx) && /(lunes|martes|miércoles|jueves|viernes|sábado|domingo)/i.test(tx);
+        const r = t.getBoundingClientRect();
+        const top = r.top + window.scrollY;
+        const bottom = r.bottom + window.scrollY;
+        return r.width > 300 && r.height > 40 && top >= yInicio - 20 && bottom < yDetalle;
       });
-      if (!titulo || !tablas.length) throw new Error('No se encontro el resumen Avisos meteorologicos.');
-      const tabla = tablas[tablas.length - 1];
-      const a = titulo.getBoundingClientRect(), b = tabla.getBoundingClientRect();
-      const x = Math.max(0, Math.floor(Math.min(a.left,b.left) + window.scrollX - 8));
-      const y = Math.max(0, Math.floor(a.top + window.scrollY - 8));
-      const right = Math.ceil(Math.max(a.right,b.right) + window.scrollX + 8);
-      const bottom = Math.ceil(b.bottom + window.scrollY + 8);
-      return { x, y, width: right-x, height: bottom-y };
+
+      if (!tablas.length) {
+        throw new Error('No se encontro la tabla situada bajo Avisos meteorológicos.');
+      }
+
+      // Si hubiera tablas anidadas, elegimos el contenedor de mayor superficie.
+      const tabla = tablas.sort((a, b) => {
+        const ra = a.getBoundingClientRect();
+        const rb = b.getBoundingClientRect();
+        return (rb.width * rb.height) - (ra.width * ra.height);
+      })[0];
+
+      const rTabla = tabla.getBoundingClientRect();
+      const x = Math.max(0, Math.floor(Math.min(rInicio.left, rTabla.left) + window.scrollX - 8));
+      const y = Math.max(0, Math.floor(yInicio - 8));
+      const right = Math.ceil(Math.max(rInicio.right, rTabla.right) + window.scrollX + 8);
+      const bottom = Math.ceil(rTabla.bottom + window.scrollY + 8);
+      return { x, y, width: right - x, height: bottom - y };
     });
 
     const fecha = fechaManana();
@@ -119,3 +153,4 @@ function estadoAvisos(texto) {
     if (browser) await browser.close();
   }
 })();
+
