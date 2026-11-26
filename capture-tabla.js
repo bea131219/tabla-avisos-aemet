@@ -72,13 +72,12 @@ function estadoAvisos(texto) {
     const pngResumen = 'docs/aemet-avisos-resumen-manana.png';
     const pngDetalle = 'docs/aemet-tabla-manana.png';
 
-    // RESUMEN ROBUSTO: crear una copia aislada de todo el contenido comprendido
-    // entre el titulo "Avisos meteorológicos" y el titulo "Detalle de avisos".
-    // Al usar un Range del DOM, nunca se incluye el mapa superior ni el detalle inferior.
+    // RESUMEN ROBUSTO: no depende del numero de comunidades, colores o altura del dia.
+    // Se captura desde el titulo "Avisos meteorológicos" hasta justo antes de "Detalle de avisos".
     await tituloResumen.scrollIntoViewIfNeeded();
     await page.waitForTimeout(500);
 
-    const resumenAislado = await page.evaluate(() => {
+    const resumenClip = await page.evaluate(() => {
       const norm = v => (v || '').replace(/\s+/g, ' ').trim();
       const visibles = Array.from(document.querySelectorAll('body *')).filter(el => {
         const r = el.getBoundingClientRect();
@@ -92,71 +91,70 @@ function estadoAvisos(texto) {
         throw new Error('No se encontraron los titulos Avisos meteorológicos / Detalle de avisos.');
       }
 
+      // Usar el ultimo titulo de resumen que tenga un Detalle de avisos por debajo.
       let resumen = null;
       let detalle = null;
       for (let i = resumenes.length - 1; i >= 0; i--) {
-        const yResumen = resumenes[i].getBoundingClientRect().top + window.scrollY;
-        const siguientes = detalles
+        const r = resumenes[i].getBoundingClientRect();
+        const y = r.top + window.scrollY;
+        const posteriores = detalles
           .map(el => ({ el, y: el.getBoundingClientRect().top + window.scrollY }))
-          .filter(x => x.y > yResumen)
+          .filter(x => x.y > y)
           .sort((a, b) => a.y - b.y);
-        if (siguientes.length) {
+        if (posteriores.length) {
           resumen = resumenes[i];
-          detalle = siguientes[0].el;
+          detalle = posteriores[0].el;
           break;
         }
       }
-      if (!resumen || !detalle) throw new Error('No se pudo delimitar el bloque Avisos meteorológicos.');
+      if (!resumen || !detalle) throw new Error('No se pudo delimitar el resumen de avisos.');
 
-      // Copiar exactamente el fragmento comprendido entre ambos titulos.
-      const range = document.createRange();
-      range.setStartBefore(resumen);
-      range.setEndBefore(detalle);
-      const fragmento = range.cloneContents();
+      const rr = resumen.getBoundingClientRect();
+      const rd = detalle.getBoundingClientRect();
+      const top = rr.top + window.scrollY;
+      const bottomLimit = rd.top + window.scrollY;
 
-      const anterior = document.getElementById('captura-avisos-aislada');
-      if (anterior) anterior.remove();
+      // Elementos visibles que comienzan despues del titulo y terminan antes del detalle.
+      // Se excluyen contenedores gigantes que engloban mapa + resumen + detalle.
+      const bloque = visibles.filter(el => {
+        const r = el.getBoundingClientRect();
+        const t = r.top + window.scrollY;
+        const b = r.bottom + window.scrollY;
+        return t >= top - 5 && b <= bottomLimit - 8 && r.width >= 10 && r.height >= 5 && r.height < (bottomLimit - top + 30);
+      });
 
-      const contenedor = document.createElement('div');
-      contenedor.id = 'captura-avisos-aislada';
-      contenedor.style.position = 'absolute';
-      contenedor.style.left = '0';
-      contenedor.style.top = '0';
-      contenedor.style.zIndex = '2147483647';
-      contenedor.style.background = '#ffffff';
-      contenedor.style.padding = '8px';
-      contenedor.style.boxSizing = 'border-box';
+      if (!bloque.length) throw new Error('No se encontraron elementos dentro del resumen de avisos.');
 
-      // Mantener el ancho real del contenido de AEMET sin incluir fondos laterales.
-      const anchoReferencia = Math.max(
-        resumen.getBoundingClientRect().width,
-        Math.min(1400, detalle.getBoundingClientRect().width)
-      );
-      contenedor.style.width = `${Math.ceil(anchoReferencia + 16)}px`;
-      contenedor.appendChild(fragmento);
-      document.body.appendChild(contenedor);
+      // El limite superior se fija exactamente en el titulo para no incluir el mapa.
+      // El inferior es el ultimo elemento visible antes de Detalle de avisos.
+      let left = rr.left + window.scrollX;
+      let right = rr.right + window.scrollX;
+      let bottom = rr.bottom + window.scrollY;
 
-      // Eliminar del clon elementos vacios o flotantes ajenos a la matriz.
-      contenedor.querySelectorAll('script, noscript').forEach(el => el.remove());
-      return true;
+      for (const el of bloque) {
+        const r = el.getBoundingClientRect();
+        // Ignorar elementos a ancho completo de pagina que pertenecen a contenedores generales.
+        if (r.width > 1500) continue;
+        left = Math.min(left, r.left + window.scrollX);
+        right = Math.max(right, r.right + window.scrollX);
+        bottom = Math.max(bottom, r.bottom + window.scrollY);
+      }
+
+      // Margenes pequenos. El fondo nunca puede alcanzar el titulo "Detalle de avisos".
+      const x = Math.max(0, Math.floor(left - 6));
+      const y = Math.max(0, Math.floor(top - 6));
+      const finalRight = Math.ceil(right + 6);
+      const finalBottom = Math.min(Math.ceil(bottom + 6), Math.floor(bottomLimit - 8));
+
+      return { x, y, width: finalRight - x, height: finalBottom - y };
     });
 
-    if (!resumenAislado) throw new Error('No se pudo crear la captura aislada de Avisos meteorológicos.');
-
-    const bloqueResumen = page.locator('#captura-avisos-aislada');
-    await bloqueResumen.waitFor({ state: 'visible', timeout: 10000 });
-    await page.waitForTimeout(500);
-    const boxResumen = await bloqueResumen.boundingBox();
-    if (!boxResumen || boxResumen.width <= 0 || boxResumen.height <= 0) {
-      throw new Error('El bloque aislado de Avisos meteorológicos no tiene dimensiones validas.');
+    if (resumenClip.width <= 0 || resumenClip.height <= 0) {
+      throw new Error(`Recorte de Avisos meteorológicos invalido: ${JSON.stringify(resumenClip)}`);
     }
 
-    console.log(`Resumen aislado: ${Math.round(boxResumen.width)} x ${Math.round(boxResumen.height)} px`);
-    await bloqueResumen.screenshot({
-      path: pngResumen,
-      type: 'png',
-      animations: 'disabled'
-    });
+    console.log('Recorte Avisos meteorológicos:', resumenClip);
+    await page.screenshot({ path: pngResumen, type: 'png', clip: resumenClip, animations: 'disabled' });
 
     // DETALLE COMPLETO: mantener screenshot directo del elemento TABLE.
     await tablaDetalle.screenshot({ path: pngDetalle, type: 'png', animations: 'disabled' });
@@ -178,4 +176,5 @@ function estadoAvisos(texto) {
     if (browser) await browser.close();
   }
 })();
+
 
